@@ -4,92 +4,209 @@ const { Server } = require('socket.io');
 const cors = require('cors');
 
 const app = express();
-app.use(cors()); // อนุญาตให้เชื่อมต่อข้ามโดเมนจาก GitHub Pages ได้
+app.use(cors());
 
 const server = http.createServer(app);
 const io = new Server(server, {
-    cors: {
-        origin: "*", // ยอมรับการเชื่อมต่อจากทุกหน้าเว็บ
-        methods: ["GET", "POST"]
-    }
+    cors: { origin: "*", methods: ["GET", "POST"] }
 });
 
-let players = {}; // เก็บข้อมูลผู้เล่นทุกคนที่ออนไลน์อยู่
-let walls = [ // ตำแหน่งกำแพงที่ต้องตรงกันทุกคน
-    { x: 200, y: 120, w: 40, h: 200 },
-    { x: 560, y: 120, w: 40, h: 200 },
-    { x: 350, y: 200, w: 100, h: 40 }
-];
+let players = {};
+let gameState = {
+    status: "waiting", // waiting, countdown, playing
+    timer: 0,
+    bombOwnerId: null
+};
+
+let gameInterval = null;
+
+function broadcastState() {
+    io.emit('game_state_update', gameState);
+}
+
+function broadcastPlayers() {
+    io.emit('current_players', players);
+}
+
+// ลูปหลักของเซิร์ฟเวอร์ คำนวณเวลาทุกๆ 1 วินาที
+function startGameLoop() {
+    if (gameInterval) clearInterval(gameInterval);
+    
+    gameInterval = setInterval(() => {
+        let activePlayers = Object.values(players).filter(p => !p.isSpectator);
+
+        // จัดการเรื่องคูลดาวน์การแปะตัว
+        Object.keys(players).forEach(id => {
+            if (players[id].cooldown > 0) {
+                players[id].cooldown--;
+                io.emit('player_updated', players[id]);
+            }
+        });
+
+        // 1. สถานะรอผู้เล่น (น้อยกว่า 2 คน)
+        if (gameState.status === "waiting") {
+            if (activePlayers.length >= 2) {
+                gameState.status = "countdown";
+                gameState.timer = 10;
+                broadcastState();
+            }
+        }
+        // 2. สถานะนับถอยหลังเริ่มเกม (10 วิ)
+        else if (gameState.status === "countdown") {
+            if (activePlayers.length < 2) {
+                gameState.status = "waiting";
+                gameState.timer = 0;
+                broadcastState();
+                return;
+            }
+            gameState.timer--;
+            if (gameState.timer <= 0) {
+                // เริ่มเกม: สุ่มคนเป็นระเบิดคนแรก
+                gameState.status = "playing";
+                const randomIndex = Math.floor(Math.random() * activePlayers.length);
+                const luckyPlayer = activePlayers[randomIndex];
+                
+                gameState.bombOwnerId = luckyPlayer.id;
+                luckyPlayer.isIt = true;
+                luckyPlayer.bombTimer = 10;
+                
+                broadcastPlayers();
+            }
+            broadcastState();
+        }
+        // 3. สถานะกำลังแข่งขัน
+        else if (gameState.status === "playing") {
+            if (activePlayers.length <= 1) {
+                // เหลือรอดคนเดียว = ชนะ
+                if (activePlayers.length === 1) {
+                    io.emit('game_over_winner', activePlayers[0].name);
+                }
+                resetGameToWaiting();
+                return;
+            }
+
+            // หักเวลาระเบิดของคนที่ถืออยู่
+            let owner = players[gameState.bombOwnerId];
+            if (owner && owner.isIt) {
+                owner.bombTimer--;
+                io.emit('player_updated', owner);
+
+                if (owner.bombTimer <= 0) {
+                    // ตู้ม! คนถือระเบิดตาย
+                    let explodedId = gameState.bombOwnerId;
+                    io.to(explodedId).emit('you_exploded');
+                    
+                    // ปรับให้เป็นคนดูทันที
+                    players[explodedId].isSpectator = true;
+                    players[explodedId].isIt = false;
+                    
+                    // หาคนรับเคราะห์คนถัดไปที่ยังไม่ตาย
+                    let remaining = Object.values(players).filter(p => !p.isSpectator);
+                    if (remaining.length > 1) {
+                        const nextIndex = Math.floor(Math.random() * remaining.length);
+                        gameState.bombOwnerId = remaining[nextIndex].id;
+                        players[gameState.bombOwnerId].isIt = true;
+                        players[gameState.bombOwnerId].bombTimer = 10;
+                        players[gameState.bombOwnerId].cooldown = 2; // กันแปะคืนทันที 2 วิ
+                    }
+                    broadcastPlayers();
+                }
+            }
+        }
+    }, 1000);
+}
+
+function resetGameToWaiting() {
+    gameState.status = "waiting";
+    gameState.timer = 0;
+    gameState.bombOwnerId = null;
+    
+    // รีเซ็ตให้ทุกคนฟื้นกลับมาเล่นรอบใหม่ได้
+    Object.keys(players).forEach(id => {
+        players[id].isSpectator = false;
+        players[id].isIt = false;
+        players[id].bombTimer = 10;
+        players[id].cooldown = 0;
+    });
+    broadcastPlayers();
+    broadcastState();
+}
 
 io.on('connection', (socket) => {
-    console.log(`ผู้เล่นเชื่อมต่อแล้ว: ${socket.id}`);
-
-    // 1. เมื่อผู้เล่นใหม่กดเริ่มเกมและส่งชื่อมา
     socket.on('join_game', (data) => {
-        // ถ้าเป็นผู้เล่นคนแรกของเซิร์ฟเวอร์ ให้เป็นคนไล่จับ (สีแดง) ทันที
-        const isFirstPlayer = Object.keys(players).length === 0;
+        // เงื่อนไข: ถ้าเกมเริ่มไปแล้ว คนเข้าใหม่จะกลายเป็น [คนดู] ทันที
+        const shouldBeSpectator = (gameState.status === "playing" || gameState.status === "countdown");
 
         players[socket.id] = {
             id: socket.id,
-            x: Math.random() * 500 + 100,
-            y: Math.random() * 300 + 100,
+            x: Math.random() * 400 + 200,
+            y: Math.random() * 200 + 150,
             name: data.name,
-            isIt: isFirstPlayer, // คนแรกเป็นสีแดง
+            isIt: false,
             vx: 0,
             vy: 0,
-            cooldown: 0
+            bombTimer: 10,
+            cooldown: 0,
+            isSpectator: shouldBeSpectator
         };
 
-        // ส่งข้อมูลผู้เล่นทั้งหมดที่มีอยู่ตอนนี้กลับไปให้ผู้เล่นใหม่
         socket.emit('current_players', players);
-        // แจ้งทุกคนในเซิร์ฟเวอร์ว่ามีคนมาใหม่
         socket.broadcast.emit('new_player', players[socket.id]);
+        socket.emit('game_state_update', gameState);
+
+        if (!gameInterval) startGameLoop();
     });
 
-    // 2. เมื่อผู้เล่นขยับตัว
     socket.on('player_move', (movementData) => {
-        if (players[socket.id]) {
+        if (players[socket.id] && !players[socket.id].isSpectator) {
             players[socket.id].x = movementData.x;
             players[socket.id].y = movementData.y;
             players[socket.id].vx = movementData.vx;
             players[socket.id].vy = movementData.vy;
-            
-            // ส่งข้อมูลการขยับนี้ไปให้คนอื่นๆ รู้
             socket.broadcast.emit('player_updated', players[socket.id]);
         }
     });
 
-    // 3. ระบบเช็คคนไล่จับชนคนอื่น (ส่งต่อตำแหน่งคนเป็นสีแดง)
     socket.on('tag_player', (data) => {
-        if (players[data.itId] && players[data.taggedId]) {
-            players[data.itId].isIt = false;
-            players[data.taggedId].isIt = true;
-            // แจ้งทุกคนให้เปลี่ยนสีตัวละครตามนี้
-            io.emit('roles_updated', { itId: data.itId, taggedId: data.taggedId });
+        let itPlayer = players[data.itId];
+        let taggedPlayer = players[data.taggedId];
+
+        // เช็คเงื่อนไขความถูกต้องก่อนยอมให้แปะส่งระเบิด
+        if (itPlayer && taggedPlayer && itPlayer.isIt && !taggedPlayer.isSpectator && itPlayer.cooldown === 0 && taggedPlayer.cooldown === 0) {
+            itPlayer.isIt = false;
+            itPlayer.cooldown = 2; // ติดคูลดาวน์คนส่ง 2 วินาที (ห้ามแปะคืนทันที)
+
+            taggedPlayer.isIt = true;
+            taggedPlayer.bombTimer = 10; // รีเซ็ตเวลาระเบิดใหม่เป็น 10 วิ
+            taggedPlayer.cooldown = 2;   // คนรับก็ติดคูลดาวน์ 2 วินาทีเช่นกัน
+
+            gameState.bombOwnerId = taggedPlayer.id;
+
+            io.emit('player_updated', itPlayer);
+            io.emit('player_updated', taggedPlayer);
         }
     });
 
-    // 4. เมื่อผู้เล่นปิดหน้าเว็บหนีไป (Disconnect)
     socket.on('disconnect', () => {
-        console.log(`ผู้เล่นออกจากเกม: ${socket.id}`);
         const wasIt = players[socket.id]?.isIt;
         delete players[socket.id];
-        
-        // บอกทุกคนให้ลบตัวละครนี้ออกผิวจอ
         io.emit('player_disconnected', socket.id);
 
-        // ถ้าคนที่เป็นสีแดงออกไป ให้สุ่มคนใหม่ขึ้นมาเป็นสีแดงแทน
-        if (wasIt && Object.keys(players).length > 0) {
-            const playerIds = Object.keys(players);
-            const randomId = playerIds[Math.floor(Math.random() * playerIds.length)];
-            players[randomId].isIt = true;
-            io.emit('new_it_assigned', randomId);
+        if (Object.keys(players).length < 2) {
+            resetGameToWaiting();
+        } else if (wasIt && gameState.status === "playing") {
+            // ถ้าคนถือระเบิดกดออกจากเกม ให้สุ่มคนใหม่ทันที
+            let remaining = Object.values(players).filter(p => !p.isSpectator);
+            if (remaining.length > 0) {
+                const nextIndex = Math.floor(Math.random() * remaining.length);
+                gameState.bombOwnerId = remaining[nextIndex].id;
+                players[gameState.bombOwnerId].isIt = true;
+                players[gameState.bombOwnerId].bombTimer = 10;
+                broadcastPlayers();
+            }
         }
     });
 });
 
-// ตั้งค่า Port ของ Server สำหรับเปิดออนไลน์
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-    console.log(`เซิร์ฟเวอร์เกมรันอยู่ที่ Port: ${PORT}`);
-});
+server.listen(PORT, () => { console.log(`Server running on port ${PORT}`); });

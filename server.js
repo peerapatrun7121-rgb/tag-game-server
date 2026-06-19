@@ -63,7 +63,6 @@ setInterval(() => {
     }
 }, 1000 / 60);
 
-// ตรวจสอบสิ่งกีดขวางสำหรับระยะแดชพุ่ง
 function checkWallCollision(x, y, radius) {
     for (let wall of walls) {
         if (x + radius > wall.x && x - radius < wall.x + wall.w && y + radius > wall.y && y - radius < wall.y + wall.h) {
@@ -94,7 +93,6 @@ io.on('connection', (socket) => {
         }
     });
 
-    // 💨 ระบบประมวลผลการแดชพุ่งไปข้างหน้า (ความไกล 75 พิกเซล)
     socket.on('player_dash', (dir) => {
         let me = players[socket.id];
         if (!me || me.isSpectator || me.health <= 0) return;
@@ -106,7 +104,6 @@ io.on('connection', (socket) => {
         let nextX = Math.max(12, Math.min(800 - 12, me.x + stepX));
         let nextY = Math.max(52, Math.min(450 - 12, me.y + stepY));
 
-        // ตรวจเช็คว่าพุ่งชนกำแพงหรือไม่ ถ้าชนให้หยุดอยู่หน้ากำแพงพอดี
         if (!checkWallCollision(nextX, nextY, 12)) {
             me.x = nextX; me.y = nextY;
         }

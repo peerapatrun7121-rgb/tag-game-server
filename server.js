@@ -28,14 +28,12 @@ function broadcastPlayers() {
     io.emit('current_players', players);
 }
 
-// ลูปหลักของเซิร์ฟเวอร์ คำนวณเวลาทุกๆ 1 วินาที
 function startGameLoop() {
     if (gameInterval) clearInterval(gameInterval);
     
     gameInterval = setInterval(() => {
         let activePlayers = Object.values(players).filter(p => !p.isSpectator);
 
-        // จัดการเรื่องคูลดาวน์การแปะตัว
         Object.keys(players).forEach(id => {
             if (players[id].cooldown > 0) {
                 players[id].cooldown--;
@@ -43,7 +41,6 @@ function startGameLoop() {
             }
         });
 
-        // 1. สถานะรอผู้เล่น (น้อยกว่า 2 คน)
         if (gameState.status === "waiting") {
             if (activePlayers.length >= 2) {
                 gameState.status = "countdown";
@@ -51,7 +48,6 @@ function startGameLoop() {
                 broadcastState();
             }
         }
-        // 2. สถานะนับถอยหลังเริ่มเกม (10 วิ)
         else if (gameState.status === "countdown") {
             if (activePlayers.length < 2) {
                 gameState.status = "waiting";
@@ -61,7 +57,6 @@ function startGameLoop() {
             }
             gameState.timer--;
             if (gameState.timer <= 0) {
-                // เริ่มเกม: สุ่มคนเป็นระเบิดคนแรก
                 gameState.status = "playing";
                 const randomIndex = Math.floor(Math.random() * activePlayers.length);
                 const luckyPlayer = activePlayers[randomIndex];
@@ -74,10 +69,8 @@ function startGameLoop() {
             }
             broadcastState();
         }
-        // 3. สถานะกำลังแข่งขัน
         else if (gameState.status === "playing") {
             if (activePlayers.length <= 1) {
-                // เหลือรอดคนเดียว = ชนะ
                 if (activePlayers.length === 1) {
                     io.emit('game_over_winner', activePlayers[0].name);
                 }
@@ -85,29 +78,25 @@ function startGameLoop() {
                 return;
             }
 
-            // หักเวลาระเบิดของคนที่ถืออยู่
             let owner = players[gameState.bombOwnerId];
             if (owner && owner.isIt) {
                 owner.bombTimer--;
                 io.emit('player_updated', owner);
 
                 if (owner.bombTimer <= 0) {
-                    // ตู้ม! คนถือระเบิดตาย
                     let explodedId = gameState.bombOwnerId;
                     io.to(explodedId).emit('you_exploded');
                     
-                    // ปรับให้เป็นคนดูทันที
                     players[explodedId].isSpectator = true;
                     players[explodedId].isIt = false;
                     
-                    // หาคนรับเคราะห์คนถัดไปที่ยังไม่ตาย
                     let remaining = Object.values(players).filter(p => !p.isSpectator);
                     if (remaining.length > 1) {
                         const nextIndex = Math.floor(Math.random() * remaining.length);
                         gameState.bombOwnerId = remaining[nextIndex].id;
                         players[gameState.bombOwnerId].isIt = true;
                         players[gameState.bombOwnerId].bombTimer = 10;
-                        players[gameState.bombOwnerId].cooldown = 2; // กันแปะคืนทันที 2 วิ
+                        players[gameState.bombOwnerId].cooldown = 2;
                     }
                     broadcastPlayers();
                 }
@@ -121,7 +110,6 @@ function resetGameToWaiting() {
     gameState.timer = 0;
     gameState.bombOwnerId = null;
     
-    // รีเซ็ตให้ทุกคนฟื้นกลับมาเล่นรอบใหม่ได้
     Object.keys(players).forEach(id => {
         players[id].isSpectator = false;
         players[id].isIt = false;
@@ -134,7 +122,6 @@ function resetGameToWaiting() {
 
 io.on('connection', (socket) => {
     socket.on('join_game', (data) => {
-        // เงื่อนไข: ถ้าเกมเริ่มไปแล้ว คนเข้าใหม่จะกลายเป็น [คนดู] ทันที
         const shouldBeSpectator = (gameState.status === "playing" || gameState.status === "countdown");
 
         players[socket.id] = {
@@ -157,13 +144,51 @@ io.on('connection', (socket) => {
         if (!gameInterval) startGameLoop();
     });
 
-    socket.on('player_move', (movementData) => {
-        if (players[socket.id] && !players[socket.id].isSpectator) {
-            players[socket.id].x = movementData.x;
-            players[socket.id].y = movementData.y;
-            players[socket.id].vx = movementData.vx;
-            players[socket.id].vy = movementData.vy;
-            socket.broadcast.emit('player_updated', players[socket.id]);
+    socket.on('player_move', (inputData) => {
+        let me = players[socket.id];
+        if (me && !me.isSpectator) {
+            let baseSpeed = 3.5; 
+            let vx = 0;
+            let vy = 0;
+
+            if (inputData.up) vy = -baseSpeed;
+            if (inputData.down) vy = baseSpeed;
+            if (inputData.left) vx = -baseSpeed;
+            if (inputData.right) vx = baseSpeed;
+
+            if (vx !== 0 && vy !== 0) {
+                vx *= 0.7071;
+                vy *= 0.7071;
+            }
+
+            const walls = [
+                { x: 200, y: 150, w: 40, h: 200 },
+                { x: 560, y: 150, w: 40, h: 200 },
+                { x: 350, y: 230, w: 100, h: 40 }
+            ];
+
+            me.vx = vx;
+            me.vy = vy;
+            
+            me.x += me.vx;
+            for (let wall of walls) {
+                if (me.x + 12 > wall.x && me.x - 12 < wall.x + wall.w && me.y + 12 > wall.y && me.y - 12 < wall.y + wall.h) {
+                    if (me.vx > 0) me.x = wall.x - 12;
+                    if (me.vx < 0) me.x = wall.x + wall.w + 12;
+                }
+            }
+            me.x = Math.max(12, Math.min(800 - 12, me.x));
+
+            me.y += me.vy;
+            for (let wall of walls) {
+                if (me.x + 12 > wall.x && me.x - 12 < wall.x + wall.w && me.y + 12 > wall.y && me.y - 12 < wall.y + wall.h) {
+                    if (me.vy > 0) me.y = wall.y - 12;
+                    if (me.vy < 0) me.y = wall.y + wall.h + 12;
+                }
+            }
+            me.y = Math.max(12 + 40, Math.min(450 - 12, me.y));
+
+            io.emit('player_updated', me);
         }
     });
 
@@ -171,14 +196,13 @@ io.on('connection', (socket) => {
         let itPlayer = players[data.itId];
         let taggedPlayer = players[data.taggedId];
 
-        // เช็คเงื่อนไขความถูกต้องก่อนยอมให้แปะส่งระเบิด
         if (itPlayer && taggedPlayer && itPlayer.isIt && !taggedPlayer.isSpectator && itPlayer.cooldown === 0 && taggedPlayer.cooldown === 0) {
             itPlayer.isIt = false;
-            itPlayer.cooldown = 2; // ติดคูลดาวน์คนส่ง 2 วินาที (ห้ามแปะคืนทันที)
+            itPlayer.cooldown = 2;
 
             taggedPlayer.isIt = true;
-            taggedPlayer.bombTimer = 10; // รีเซ็ตเวลาระเบิดใหม่เป็น 10 วิ
-            taggedPlayer.cooldown = 2;   // คนรับก็ติดคูลดาวน์ 2 วินาทีเช่นกัน
+            taggedPlayer.bombTimer = 10;
+            taggedPlayer.cooldown = 2;
 
             gameState.bombOwnerId = taggedPlayer.id;
 
@@ -195,7 +219,6 @@ io.on('connection', (socket) => {
         if (Object.keys(players).length < 2) {
             resetGameToWaiting();
         } else if (wasIt && gameState.status === "playing") {
-            // ถ้าคนถือระเบิดกดออกจากเกม ให้สุ่มคนใหม่ทันที
             let remaining = Object.values(players).filter(p => !p.isSpectator);
             if (remaining.length > 0) {
                 const nextIndex = Math.floor(Math.random() * remaining.length);

@@ -123,15 +123,16 @@ io.on('connection', (socket) => {
         if (!gameInterval) startGameLoop();
     });
 
-    // ✨ รับพิกัดโดยตรงจากเครื่องคนเล่นเพื่อความลื่นไหลสูงสุด ไม่กระตุก ไม่ขัดแย้ง
+    // ✨ แก้ไขจุดบั๊ก: รับค่า x, y ตรงๆ และกระจายออกไปหาผู้เล่นทุกคนในห้องทันที
     socket.on('player_move_direct', (coords) => {
-        let me = players[socket.id];
-        if (me && !me.isSpectator) {
-            me.x = coords.x;
-            me.y = coords.coordsY !== undefined ? coords.coordsY : coords.y; // safety check
-            me.vx = coords.vx;
-            me.vy = coords.vy;
-            socket.broadcast.emit('player_updated', me); // ส่งบอกคนอื่นให้สไลด์ตาม
+        if (players[socket.id] && !players[socket.id].isSpectator) {
+            players[socket.id].x = coords.x;
+            players[socket.id].y = coords.y;
+            players[socket.id].vx = coords.vx;
+            players[socket.id].vy = coords.vy;
+            
+            // ส่งอัปเดตกระจายออกไปให้ผู้เล่นคนอื่นเห็นตำแหน่งแบบ Real-time
+            io.emit('player_updated', players[socket.id]);
         }
     });
 

@@ -7,115 +7,118 @@ const app = express();
 app.use(cors());
 
 const server = http.createServer(app);
-const io = new Server(server, {
-    cors: { origin: "*", methods: ["GET", "POST"] }
-});
+const io = new Server(server, { cors: { origin: "*", methods: ["GET", "POST"] } });
 
 let players = {};
-let gameState = { status: "waiting", timer: 0, bombOwnerId: null };
-let gameInterval = null;
+let serverProjectiles = [];
 
-function broadcastState() { io.emit('game_state_update', gameState); }
-function broadcastPlayers() { io.emit('current_players', players); }
+// วงความกว้างสกิลพอดีตัว (ไม่ทำวงกว้างเกินไปตามสั่ง)
+const SKILL_SETTINGS = {
+    mage: {
+        1: { name: "บอลเพลิง", speed: 6, radius: 10, type: "fire" },
+        2: { name: "เปลวพุ่ง", speed: 8, radius: 7, type: "fire" }
+    },
+    ninja: {
+        1: { name: "ดาวสายฟ้า", speed: 7, radius: 8, type: "lightning" },
+        2: { name: "กระสุนจักระ", speed: 9, radius: 6, type: "lightning" }
+    }
+};
 
-function startGameLoop() {
-    if (gameInterval) clearInterval(gameInterval);
-    gameInterval = setInterval(() => {
-        let activePlayers = Object.values(players).filter(p => !p.isSpectator);
-        Object.keys(players).forEach(id => { if (players[id].cooldown > 0) { players[id].cooldown--; io.emit('player_updated', players[id]); } });
+setInterval(() => {
+    // ลูปหลักฝั่งเซิร์ฟเวอร์ คำนวณพิกัดกระสุนสกิลชนคนเล่นเพื่อหักหัวใจ
+    for (let i = serverProjectiles.length - 1; i >= 0; i--) {
+        let proj = serverProjectiles[i];
+        proj.x += proj.vx;
+        proj.y += proj.vy;
 
-        if (gameState.status === "waiting" && activePlayers.length >= 2) {
-            gameState.status = "countdown"; gameState.timer = 10; broadcastState();
-        }
-        else if (gameState.status === "countdown") {
-            if (activePlayers.length < 2) { gameState.status = "waiting"; gameState.timer = 0; broadcastState(); return; }
-            gameState.timer--;
-            if (gameState.timer <= 0) {
-                gameState.status = "playing";
-                let remaining = Object.values(players).filter(p => !p.isSpectator);
-                if (remaining.length >= 2) {
-                    const randomIndex = Math.floor(Math.random() * remaining.length);
-                    gameState.bombOwnerId = remaining[randomIndex].id;
-                    players[gameState.bombOwnerId].isIt = true; players[gameState.bombOwnerId].bombTimer = 10;
-                }
-                broadcastPlayers();
-            }
-            broadcastState();
-        }
-        else if (gameState.status === "playing") {
-            if (activePlayers.length <= 1) { resetGameToWaiting(); return; }
-            let owner = players[gameState.bombOwnerId];
-            if (owner && owner.isIt) {
-                owner.bombTimer--; io.emit('player_updated', owner);
-                if (owner.bombTimer <= 0) {
-                    let explodedId = gameState.bombOwnerId;
-                    io.to(explodedId).emit('you_exploded');
-                    players[explodedId].isSpectator = true; players[explodedId].isIt = false;
-                    let remaining = Object.values(players).filter(p => !p.isSpectator);
-                    if (remaining.length > 1) {
-                        gameState.bombOwnerId = remaining[Math.floor(Math.random() * remaining.length)].id;
-                        players[gameState.bombOwnerId].isIt = true; players[gameState.bombOwnerId].bombTimer = 10; players[gameState.bombOwnerId].cooldown = 2;
+        // ตรวจเช็คกระสุนชนผู้เล่นคนอื่นไหม
+        Object.keys(players).forEach(pId => {
+            let p = players[pId];
+            if (pId !== proj.ownerId && !p.isSpectator && p.health > 0) {
+                let dist = Math.hypot(proj.x - p.x, proj.y - (p.y - 15)); // ชนกลางลำตัว
+                if (dist < (proj.r + 14)) {
+                    // ชนเป้าหมาย!! ลดเลือด 1 หัวใจ
+                    p.health--;
+                    io.emit('player_updated', p);
+
+                    // หากหัวใจหมด 3 ดวง ตกรอบ
+                    if (p.health <= 0) {
+                        p.isSpectator = true;
+                        io.to(pId).emit('game_over_died');
                     }
-                    broadcastPlayers();
+                    // ลบกระสุนนี้ออกทันทีเมื่อทำงานเสร็จ
+                    serverProjectiles.splice(i, 1);
                 }
             }
-        }
-    }, 1000);
-}
+        });
 
-function resetGameToWaiting() {
-    gameState.status = "waiting"; gameState.timer = 0; gameState.bombOwnerId = null;
-    Object.keys(players).forEach(id => { players[id].isSpectator = false; players[id].isIt = false; players[id].bombTimer = 10; players[id].cooldown = 0; });
-    broadcastPlayers(); broadcastState();
-}
+        // ลบกระสุนที่หลุดหน้าจอเซิร์ฟเวอร์
+        if (serverProjectiles[i] && (proj.x < 0 || proj.x > 800 || proj.y < 0 || proj.y > 450)) {
+            serverProjectiles.splice(i, 1);
+        }
+    }
+}, 1000 / 60); // รัน 60 เฟรมต่อวิ
 
 io.on('connection', (socket) => {
     socket.on('join_game', (data) => {
-        const shouldBeSpectator = (gameState.status === "playing");
-        // ✨ ลงทะเบียนรับข้อมูลชุดแต่งตัว (color, hat) เก็บลงฐานข้อมูลชั่วคราว
+        // ลงทะเบียนผู้เล่นพร้อม 3 หัวใจเต็มสัดส่วน ❤️❤️❤️
         players[socket.id] = {
             id: socket.id, x: Math.random() * 400 + 200, y: Math.random() * 200 + 150,
             name: data.name, color: data.color || '#ffffff', hat: data.hat || 'none',
-            isIt: false, vx: 0, vy: 0, bombTimer: 10, cooldown: 0, isSpectator: shouldBeSpectator
+            charClass: data.charClass || 'mage', health: 3, vx: 0, vy: 0, isSpectator: false
         };
         socket.emit('current_players', players);
         socket.broadcast.emit('new_player', players[socket.id]);
-        socket.emit('game_state_update', gameState);
-        if (!gameInterval) startGameLoop();
     });
 
     socket.on('player_move_direct', (coords) => {
-        if (players[socket.id] && !players[socket.id].isSpectator) {
-            players[socket.id].x = coords.x; players[socket.id].y = coords.y;
-            players[socket.id].vx = coords.vx; players[socket.id].vy = coords.vy;
-            socket.broadcast.emit('player_updated', players[socket.id]);
+        let me = players[socket.id];
+        if (me && !me.isSpectator && me.health > 0) {
+            me.x = coords.x; me.y = coords.y; me.vx = coords.vx; me.vy = coords.vy;
+            socket.broadcast.emit('player_updated', me);
         }
     });
 
-    socket.on('tag_player', (data) => {
-        let itPlayer = players[data.itId]; let taggedPlayer = players[data.taggedId];
-        if (itPlayer && taggedPlayer && itPlayer.isIt && !taggedPlayer.isSpectator && itPlayer.cooldown === 0 && taggedPlayer.cooldown === 0) {
-            itPlayer.isIt = false; itPlayer.cooldown = 2;
-            taggedPlayer.isIt = true; taggedPlayer.bombTimer = 10; taggedPlayer.cooldown = 2;
-            gameState.bombOwnerId = taggedPlayer.id;
-            io.emit('player_updated', itPlayer); io.emit('player_updated', taggedPlayer);
-        }
+    // 🟥 ระบบร่ายสกิล: ส่งสัญญาณเส้นเล็งล่วงหน้า 1 วินาที ก่อนส่งพลังงานออกไป
+    socket.on('cast_skill', (data) => {
+        let me = players[socket.id];
+        if (!me || me.isSpectator || me.health <= 0) return;
+
+        let settings = SKILL_SETTINGS[me.charClass]?.[data.skillNum];
+        if (!settings) return;
+
+        // สั่งให้ทุกเครื่องขึ้นเส้นเตือนประสีแดงเล็งทิศทางนั้นทันที
+        io.emit('skill_telegraph', {
+            x: me.x, y: me.y - 15,
+            dx: data.dirX, dy: data.dirY,
+            type: settings.type
+        });
+
+        // หน่วงเวลาเซิร์ฟเวอร์ไว้ 1 วินาที (1000ms) แล้วค่อยปล่อยสกิลของจริงพุ่งออกมา 🌟
+        setTimeout(() => {
+            // เช็คอีกครั้งว่าคนร่ายยังไม่ตายตอนเวลาผ่านไป 1 วิ
+            if (players[socket.id] && !players[socket.id].isSpectator) {
+                let currentMe = players[socket.id];
+                let projData = {
+                    x: currentMe.x,
+                    y: currentMe.y - 15,
+                    vx: data.dirX * settings.speed,
+                    vy: data.dirY * settings.speed,
+                    r: settings.radius,
+                    type: settings.type,
+                    ownerId: socket.id
+                };
+                serverProjectiles.push(projData);
+                io.emit('skill_projectile', projData); // ส่งให้หน้าจอลูกค้าวาดผลเอฟเฟกต์พุ่ง
+            }
+        }, 1000);
     });
 
     socket.on('disconnect', () => {
-        const wasIt = players[socket.id]?.isIt; delete players[socket.id];
+        delete players[socket.id];
         io.emit('player_disconnected', socket.id);
-        if (Object.keys(players).length < 2) { resetGameToWaiting(); }
-        else if (wasIt && gameState.status === "playing") {
-            let remaining = Object.values(players).filter(p => !p.isSpectator);
-            if (remaining.length > 0) {
-                gameState.bombOwnerId = remaining[Math.floor(Math.random() * remaining.length)].id;
-                players[gameState.bombOwnerId].isIt = true; players[gameState.bombOwnerId].bombTimer = 10;
-                broadcastPlayers();
-            }
-        }
     });
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => { console.log(`Server running on port ${PORT}`); });
+server.listen(PORT, () => { console.log(`Battle Server running on port ${PORT}`); });

@@ -49,6 +49,7 @@ function startGameLoop() {
             }
         }
         else if (gameState.status === "countdown") {
+            // ถ้าในระหว่างนับถอยหลัง มีคนกดออกจนผู้เล่นเหลือน้อยกว่า 2 คน ให้กลับไปรอใหม่
             if (activePlayers.length < 2) {
                 gameState.status = "waiting";
                 gameState.timer = 0;
@@ -58,13 +59,17 @@ function startGameLoop() {
             gameState.timer--;
             if (gameState.timer <= 0) {
                 gameState.status = "playing";
-                const randomIndex = Math.floor(Math.random() * activePlayers.length);
-                const luckyPlayer = activePlayers[randomIndex];
                 
-                gameState.bombOwnerId = luckyPlayer.id;
-                luckyPlayer.isIt = true;
-                luckyPlayer.bombTimer = 10;
-                
+                // ดึงรายชื่อคนทั้งหมดที่อยู่ในห้อง ณ วินาทีนั้น (รวมคนที่กดเข้ามาระหว่างนับถอยหลัง 10 วิด้วย) มาสุ่มระเบิด
+                let finalActivePlayers = Object.values(players).filter(p => !p.isSpectator);
+                if (finalActivePlayers.length >= 2) {
+                    const randomIndex = Math.floor(Math.random() * finalActivePlayers.length);
+                    const luckyPlayer = finalActivePlayers[randomIndex];
+                    
+                    gameState.bombOwnerId = luckyPlayer.id;
+                    luckyPlayer.isIt = true;
+                    luckyPlayer.bombTimer = 10;
+                }
                 broadcastPlayers();
             }
             broadcastState();
@@ -122,7 +127,9 @@ function resetGameToWaiting() {
 
 io.on('connection', (socket) => {
     socket.on('join_game', (data) => {
-        const shouldBeSpectator = (gameState.status === "playing" || gameState.status === "countdown");
+        // ✨ แก้ไขจุดนี้: จะให้เป็นผู้ชมก็ต่อเมื่อรอบการแข่ง "เริ่มวิ่งไล่จับไปแล้ว" (playing) เท่านั้น
+        // หากอยู่ในช่วงนับถอยหลังก่อน 10 วินาที (countdown) จะได้สิทธิ์เป็นผู้เล่นเตรียมตัววิ่งปกติทันที!
+        const shouldBeSpectator = (gameState.status === "playing");
 
         players[socket.id] = {
             id: socket.id,
